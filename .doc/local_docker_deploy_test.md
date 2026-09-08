@@ -12,7 +12,7 @@
 
 | # | 改动 | 观察面 |
 | --- | --- | --- |
-| 8.5 | `{contextBefore}` 里已翻译的行以 `[SOURCE]` / `[TRANSLATION]` 配对出现 | LocalAI 收到的 user message |
+| 8.5 | 开关打开后 `{contextBefore}` / `{contextAfter}` 每句一行 JSON(position / source / translation),前文带译文 | LocalAI 收到的 user message |
 | 8.3 | `/api/translate/content` 单条模式也带上下文 | lingarr 日志 + LocalAI 请求体 |
 | 8.4 / 6 | `/content` 复用 `TranslateSubtitles`:进度日志、重复行不合并、取消不污染统计 | lingarr 日志、Translations 页、`/api/statistics` |
 
@@ -30,7 +30,7 @@
 
 1. **批量翻译现在是开着的**(日志里有 `Processing batch translation request with 1891 lines`)。新开关只在**单条模式**下可见且生效,测试前必须先关掉批量(第 6 节)。
 2. **单条模式 = 每行一次请求**。本地模型下 1891 行远超 Bazarr 硬编码的 1800 秒超时,**所有测试都用短字幕(几十行)**。这是 Bazarr 侧限制,与本次改动无关。
-3. **开关只在 user prompt 含 `{contextBefore}` 时生效**。默认 user prompt 是 `{lineToTranslate}`,不含占位符,不改 prompt 开关就是静默无效的。
+3. **开关只在 user prompt 含 `{contextBefore}` / `{contextAfter}` 时生效**。你的库是升级上来的,user prompt 还是你自己写的那份,第 6 节给出新安装的默认布局,照抄即可。
 
 ---
 
@@ -86,7 +86,7 @@ docker build -f Lingarr.Server/Dockerfile \
 
 - Dockerfile 是多阶段构建:`node:24-slim` 编译前端 → `dotnet/sdk:10.0` 编译后端 → `dotnet/aspnet:10.0` 运行。**NAS 不需要装 node 或 dotnet**。
 - `TARGETARCH` 由 BuildKit 按 NAS 自身架构注入,amd64 / arm64 都会自动正确。
-- `VERSION` 会进 `/p:Version=`,必须是合法 SemVer。不传则为 `0.0.0-dev`,UI 可能提示「有新版本」,无害。
+- `VERSION` 会进 `/p:Version=`,必须是合法 SemVer。不传则为 `0.0.0-dev`,UI 可能提示「有新版本」,无害。第二轮改版(JSON 上下文 + 输出清洗)建议用 `1.3.0-context.2`,侧边栏一眼能看出容器是否已换到新构建。
 - 首次构建约 5~10 分钟,峰值约 4 GB 内存,需要能访问 `mcr.microsoft.com`、`docker.io`、NuGet、npm。
 
 自检:
@@ -371,18 +371,25 @@ docker run --rm -v /srv/docker/apps/media-stack/config/lingarr:/data:ro alpine s
 
 1. **Settings → Services**:`Use batch translation` → **Disabled**。
 2. 同页 `localai` 服务卡片 → **Open Request Settings** → **Translation Prompt** 卡片:
-   - `Translation user prompt` 改成含占位符的模板,推荐:
+   - `Translation user prompt` 改成新安装的默认布局(你是老用户,数据库里还是旧值,要**手动粘贴**;末尾那段指令放最后是有意的,离模型的回答最近):
 
      ```
-     Previous lines:
+     [Context-Before]
      {contextBefore}
 
-     Translate this line:
+     [Context-After]
+     {contextAfter}
+
+     [Target-to-Translate]
      {lineToTranslate}
+
+     Translate only the text under [Target-to-Translate]. The lines under [Context-Before] and [Context-After] are neighbouring subtitle lines for context only: use them to keep names, terms and tone consistent, and never translate or repeat them. When a [Context-Before] entry includes a "translation" field, follow that earlier translation. Reply with the translated target text alone, as plain text, without labels, JSON or position numbers.
      ```
 
+     你之前自己写的 CRITICAL RULES 可以删掉,内容已被这段覆盖;system prompt 不用改。
+
    - `Context before` = `2`
-   - `Context after` = `0`(第一轮先设 0,让 user message 里只有配对块;第 12 节再设 1 验证 after 恒原文)
+   - `Context after` = `0`(第一轮先设 0,让 user message 里只有前文;第 12 节再设 1 验证 after 也是 JSON 但没有 translation)
    - **Use translated lines as context before** → **Enabled**(新开关,只在批量关闭时显示)
 3. 持久化验证:刷新页面,开关仍是 Enabled;`curl -s http://<nas>:9876/api/setting/ai_context_use_translated` 返回 `"true"`。
 
@@ -413,11 +420,12 @@ docker run -d --name echo --network ai_stack_external_net mendhak/http-https-ech
 | --- | --- | --- |
 | `/content` 走了单条 + 上下文 | lingarr 日志 | `Using individual line translation for N lines from en to zh-CN (context before: 2, after: 0, translated context: True)` |
 | `/content` 有进度日志(改前没有) | lingarr 日志 | `Progress: N% (Subtitle X of Y)`,类别仍是 `TranslationRequestService` |
-| 配对格式 | LocalAI 请求体 `messages` 里 role=user 的 content | 第 2 行起出现 `[SOURCE] …\n[TRANSLATION] …`,一行一组、按顺序、最多 2 组 |
+| JSON 行格式 | LocalAI 请求体 `messages` 里 role=user 的 content | 第 2 行起出现 `{"position":N,"source":"…","translation":"…"}`,一句一行、按顺序、最多 2 行;中文不是 `\uXXXX`;多行字幕的换行是 `\n` 转义而不是真换行 |
 | 重复文本不被合并 | LocalAI 收到的请求数 | 三个 `Yeah.` 产生**三次**请求,后两次的上下文里带前一次的译文 |
-| after 恒原文 | 第 12 节把 `Context after` 设 1 后 | after 部分是纯原文,没有标签 |
+| after 无译文 | 第 12 节把 `Context after` 设 1 后 | after 部分是 `{"position":N,"source":"…"}`,没有 translation 字段 |
+| 标签不再泄漏 | lingarr 日志 + Translations 详情页 | 若模型仍回 `[TRANSLATION] …`,日志出现 `Removed a prompt label or JSON wrapper from the model output`,详情页译文里没有 `[TRANSLATION]`;校对(Proofread)结果同样经过清洗 |
 | `/file` 路径 | lingarr 日志 | `TranslateJob started` → `Using individual translation with context (before: 2, after: 0, translated context: True)` → `Progress: …` |
-| 开关关闭回归 | LocalAI 请求体 | 上下文变回纯原文,没有 `[SOURCE]` |
+| 开关关闭回归 | LocalAI 请求体 | 上下文变回纯原文,没有 JSON |
 
 ---
 
@@ -469,9 +477,10 @@ curl -sS -X POST http://<nas>:9876/api/translate/content \
 - lingarr 日志:`Using individual line translation for 7 lines from en to zh-CN (context before: 2, after: 0, translated context: True)`,随后若干条 `Progress: N% (Subtitle X of 7)`,最后 `Individual line translation completed. Processed 7 lines`。
 - LocalAI 请求体:
   - 第 1 行的 user message 里 `{contextBefore}` 位置为空;
-  - 第 2 行起出现 `[SOURCE] Detective Mouri is on the case.\n[TRANSLATION] <第 1 行译文>`;
+  - 第 2 行起出现 `{"position":1,"source":"Detective Mouri is on the case.","translation":"<第 1 行译文>"}`;
   - 第 4、5 行(后两个 `Yeah.`)各自是独立请求,且上下文里带着前一个 `Yeah.` 的译文;
-  - 第 7 行的上下文是第 5 行(`Yeah.`)和第 6 行(空)的配对。
+  - 第 7 行的上下文是第 5 行(`Yeah.`)和第 6 行(空)两条 JSON;
+  - 译文里不出现 `[TRANSLATION]` 这类标签(模型真回了标签的话,日志会有 `Removed a prompt label or JSON wrapper …`)。
 - Translations 页多一条 `Completed` 请求,详情页能看到逐行译文。
 
 ### 8.5 坑
@@ -514,9 +523,9 @@ curl -sS -X POST http://<nas>:9876/api/translate/content \
 2. 观察:
    - 日志三连:`TranslateJob started for subtitle: …` → `Using individual translation with context (before: 2, after: 0, translated context: True) for subtitle: …` → `Progress: N% (Subtitle X of Y)`;
    - Translations → 该请求详情页,译文逐行实时出现;
-   - LocalAI 请求体第 2 行起带配对块;
+   - LocalAI 请求体第 2 行起带 JSON 上下文行;
    - 完成后目标语言字幕文件出现在媒体目录。
-3. 可选,验证续传预填也能配对(设计文档 4.6 第二行):翻到一半 **Cancel**,再点 **Resume**。日志出现 `Resuming translation for request N: X of Y lines already translated`,之后第一条 LocalAI 请求的配对块里,译文来自数据库里已存的行。
+3. 可选,验证续传预填的行也带译文(设计文档 4.6 第二行):翻到一半 **Cancel**,再点 **Resume**。日志出现 `Resuming translation for request N: X of Y lines already translated`,之后第一条 LocalAI 请求的 JSON 上下文里,`translation` 来自数据库里已存的行。
 
 ---
 
@@ -534,8 +543,8 @@ curl -sS -X POST http://<nas>:9876/api/translate/content \
 
 | 操作 | 期望 |
 | --- | --- |
-| 开关改 **Disabled**,重跑测试 A | LocalAI 请求体里上下文是纯原文,没有 `[SOURCE]`;日志 `translated context: False` |
-| `Context after` 设 1,开关 Enabled,重跑测试 A | before 部分是配对块,after 部分是纯原文 |
+| 开关改 **Disabled**,重跑测试 A | LocalAI 请求体里上下文是纯原文,没有 JSON;日志 `translated context: False` |
+| `Context after` 设 1,开关 Enabled,重跑测试 A | before 的 JSON 带 translation,after 的 JSON 只有 position 和 source |
 | `Use batch translation` 改 **Enabled** | 开关从 UI 消失;`/content` 日志回到 `Processing batch translation request with N lines`;行为与改动前一致 |
 
 ---
@@ -563,7 +572,10 @@ docker compose up -d lingarr
 | 拨新开关报 `Setting not found or could not be updated` | 种子行不存在,容器不是新镜像 | 第 5 节核对镜像与 `version_info` |
 | Translation Prompt 卡片里看不到新开关 | 批量翻译还开着 | 第 6 节第 1 步 |
 | LocalAI 请求体里没有上下文 | user prompt 没写 `{contextBefore}`,或 `Context before` 为 0 | 第 6 节第 2 步 |
-| 有上下文但没有 `[SOURCE]` 标签 | 开关未开,或看的是第 1 行(前面没有已译行) | 从第 2 行起看 |
+| 有上下文但不是 JSON | 开关未开 | 第 6 节第 2 步 |
+| JSON 里没有 translation 字段 | 看的是第 1 行(前面没有已译行),或看的是 after 部分 | 从第 2 行的 before 部分看 |
+| 译文里出现 `[TRANSLATION]` | 容器不是本轮镜像(清洗逻辑未生效) | 第 5 节核对镜像 |
+| 某一行译文等于原文,日志有 `Model returned no usable translation for line …` | 模型对这一行只回了标签或空串,清洗后没剩下东西,按批量路径的做法回退原文 | 看 LocalAI 日志里那次请求的 `content`;通常是模型偶发抽风,重跑即可 |
 | `/content` 500 且 `All configured translation services failed` | LocalAI 不可达 / 模型未加载 | 看 LocalAI 日志 |
 
 ---
@@ -573,10 +585,10 @@ docker compose up -d lingarr
 | 测试 | 期望 | 实际 | 通过 |
 | --- | --- | --- | --- |
 | 第 5 节 迁移 | 设置行存在,`version_info` = 21 | | |
-| A `/content` 上下文 + 配对 | 日志 `translated context: True`;LocalAI 见配对块;`Yeah.` 三次请求 | | |
+| A `/content` 上下文 + JSON | 日志 `translated context: True`;LocalAI 见 JSON 行;`Yeah.` 三次请求;译文无标签 | | |
 | B 取消 | 500 + `Cancelled` + 统计不变 | | |
-| C `/file` | 日志三连 + 配对块 + 文件生成 | | |
+| C `/file` | 日志三连 + JSON 行 + 文件生成 | | |
 | D Bazarr | 日志同 A;Bazarr 收到完整文件 | | |
 | 回归:开关关闭 | 纯原文上下文 | | |
-| 回归:after = 1 | after 纯原文 | | |
+| 回归:after = 1 | after 为无 translation 的 JSON | | |
 | 回归:批量打开 | 开关消失,行为同改前 | | |

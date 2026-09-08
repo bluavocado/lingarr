@@ -1,7 +1,7 @@
 # 设计:已译上下文 + `/content` 复用单条翻译路径
 
 > 代码基准:分支 `feature/personalized`,HEAD `28f6a19`
-> 状态:**已实现**(2026-09-07,见文末「实现记录」)
+> 状态:**已实现,第二轮改版已实现**(2026-09-08,见第 10、11 节)
 > 出处:[`prompt_and_batch_behavior.md`](./prompt_and_batch_behavior.md) 第 8 节改进项 8.3 / 8.4 / 8.5
 
 ---
@@ -129,6 +129,8 @@ Lingarr 每个配置项都以此方式注册(`preserve_line_breaks`、`use_batch
 > 给方法加参数会踩到编译期陷阱(11 处测试调用的 `CancellationToken` 是位置实参),**详见 8bis 发现 2 —— 动手前务必先读**。
 
 ### 4.2 渲染格式
+
+> ⚠️ **本节及 4.3、4.4、4.5 已被第 11 节取代**(实测后改为 JSON 行格式)。保留原文以记录当时的推理。
 
 **已定稿:采用 `[SOURCE]` / `[TRANSLATION]` 标签配对。**
 
@@ -509,6 +511,74 @@ cancellationToken.ThrowIfCancellationRequested();
 另:`Lingarr.Docs/translation-services/ai-services.md` 的 `{contextBefore}` 占位符说明补了一句开关行为,这是第 7 节清单之外的唯一改动。
 
 验证:`dotnet test --filter "Category!=Integration"` 228 通过(含新增 6 个);SQLite 迁移升/降/重放通过;`oxlint` 与 `vue-tsc --noEmit` 零错误。
+
+---
+
+## 11. 第二轮:实测反馈与改版(2026-09-08)
+
+第一轮部署到 NAS(LocalAI + Qwen3.6-27B)后,用真实字幕测出三个问题:
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | 配对块没有编号,模型看不出行与行的对应 | 4.2 的格式只有标签没有 position |
+| 2 | `/content` 的一条「行」内含 `\n`(Bazarr 把多行字幕整体当一行发来),`[SOURCE]` 块被撑成两行 | 标签格式对换行没有任何转义 |
+| 3 | 模型把 `[TRANSLATION]` 当输出返回,该译文被存回后又进入后续行的上下文,形成 `[TRANSLATION] [TRANSLATION] …` 污染循环 | 4.2 对「标签不会被续写」的判断在这个模型上不成立;且没有任何输出清洗 |
+
+### 11.1 决策(经多轮讨论,含被否决的方案)
+
+| 议题 | 结论 | 理由 |
+| --- | --- | --- |
+| 开关 vs 新增 `{previousTranslations}` 占位符 | **保留开关,不新增占位符** | 新占位符和 `{contextBefore}` 取同一组前文、共用同一行数设置,是同一个槽位;两者同时写进 prompt 无意义,只能靠说明去禁止。开关改变占位符渲染方式在仓库里有先例:`language_code_format` 之于 `{sourceLanguage}` |
+| 结构化格式 | **JSON 行**,与批量模式的 `{position,line}` 同源 | 换行、引号由 JSON 转义;目标句仍是裸文本,不构成「续写标签」的诱导 |
+| 后文 | 开关开时同样 JSON 行,只有 position / source | 同一 prompt 内格式统一 |
+| 指导文字放哪 | **写进 `ai_user_prompt` 新安装默认值末尾**,不做运行时注入、不做新设置项 | system prompt 在批量模式也用,放那里会把「只翻 [Target-to-Translate]」带进没有该段落的批量请求;user prompt 只在单条模式出现。目标句在指导段之前、上下文之后 |
+| 指导放前还是放后 | 放 user message **最后** | 离模型回答最近 |
+| 老用户 | **一律不动**:prompt 仍是 `{lineToTranslate}`、行数仍是 2 的也不改 | 用户决定;文档给出新默认全文供手动粘贴 |
+| 新安装默认 | `ai_user_prompt` = 分段布局 + 指导段;`ai_context_before` / `after` = 0 | 行为中性:上下文段为空直到用户调高行数 |
+| 自定义 JSON key(如 `previous_translation`) | **否决** | 只有 `messages[].content` 会进模型;LocalAI 静默丢弃未知 key(用 `prompt_tokens` 230 vs 376 证实),线上 API 直接 400 |
+| few-shot 对话展开 | **暂不做** | 效果最好但改动面大一倍以上;需要时再加 |
+
+上游先例:M0014 曾把独立的 `ai_context_prompt`(`[TARGET]` / `[CONTEXT]` 分段)合并进 `ai_user_prompt`,本次回到同一思路。
+
+### 11.2 新格式
+
+开关开时 `BuildContext` 每条上下文渲染为一个 JSON 对象(`Lingarr.Server/Models/ContextLine.cs`),`string.Join("\n")` 后即 JSON 行:
+
+```
+{"position":12,"source":"Hold it!","translation":"等一下！"}
+{"position":14,"source":"Hey! What are you doing?\nGet away from here!","translation":"嘿！你在干什么？\n离这儿远点！"}
+{"position":18,"source":"Who called us?"}                  ← after 侧或尚未翻译的行:无 translation
+```
+
+序列化用 `JavaScriptEncoder.UnsafeRelaxedJsonEscaping`(否则中文变 `\uXXXX`),`WhenWritingNull` 省略 translation。开关关时两侧维持纯原文,一个字不改。
+
+### 11.3 输出清洗(始终生效)
+
+`SubtitleTranslationService.CleanTranslationOutput`,在 `TranslateSubtitleLine` 拿到 provider 返回后调用,覆盖 `/file`、`/content`、`/line` 与所有 provider:
+
+1. `Trim()`;
+2. 循环剥掉开头的 `[TRANSLATION]` / `[SOURCE]` / `[TARGET…]` 标签(忽略大小写,允许 `#12` 编号与冒号),处理叠加的 `[TRANSLATION] [TRANSLATION] …`;
+3. 若整段是 JSON 对象且含 `translation` 或 `line` 字符串字段,取该字段;
+4. 只匹配这三个词,`[MUSIC]`、`[LAUGHS]` 等 SDH 标记不受影响;发生清洗时记一条 Information 日志;
+5. 清洗后为空(模型只回了一个标签,或原始输出就是空)→ 记 Warning 并**回退为原文行**,与批量路径对缺译文的处理一致。不报错:报错会让一行抽风使整个文件 Failed,且 Retry 大概率复现;
+6. **校对路径同样清洗**:`ProofreadJob` 与单行校对 `TranslationRequestService.ProofreadLine` 拿到 `ProofreadAsync` 结果后先经 `CleanTranslationOutput`。校对默认 prompt 用的正是 `[SOURCE]/[TRANSLATION]` 标签,不清洗会用带标签的文本覆盖已正确的译文。批量路径**不**清洗:批量请求里没有任何标签,模型无从回声。
+
+它切断了污染循环:存回的译文永远不含标签,后续行的 `translation` 字段也就干净。
+
+### 11.4 改动面
+
+| 文件 | 改动 |
+| --- | --- |
+| `Lingarr.Server/Models/ContextLine.cs` | 新建 |
+| `Lingarr.Server/Services/SubtitleTranslationService.cs` | `BuildContext` 改 JSON 渲染;新增 `CleanTranslationOutput`;`TranslateSubtitleLine` 调用之,清洗后为空回退原文 |
+| `Lingarr.Server/Jobs/ProofreadJob.cs`、`Lingarr.Server/Services/TranslationRequestService.cs`(`ProofreadLine`) | 校对结果套 `CleanTranslationOutput` |
+| `Lingarr.Migrations/Migrations/M0014_SeedAiUserPrompt.cs` | 种子值改为新布局(只影响新安装) |
+| `Lingarr.Migrations/Migrations/M0002_SeedSettings.cs` | `ai_context_before` / `after` 种子 2 → 0(只影响新安装) |
+| `Lingarr.Client/.../TranslationPrompt.vue` | 开关说明改写 |
+| `Lingarr.Docs/translation-services/ai-services.md` | 默认 prompt、占位符表、清洗说明 |
+| `Lingarr.Server.Tests/.../SubtitleTranslationServiceTests.cs` | 6 个上下文用例改 JSON 期望;新增换行转义 / 中文不转义 / 标签回声端到端 / `CleanTranslationOutput` 14 组 Theory |
+
+不改:`ITranslationService` 契约、provider、`BaseLanguageService`、`ai_prompt` 默认值、老用户任何设置行、`TranslationJob` / `TranslationRequestService`。
 
 ---
 
