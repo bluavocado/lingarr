@@ -9,6 +9,7 @@ using Lingarr.Server.Filters;
 using Lingarr.Server.Interfaces.Services;
 using Lingarr.Server.Interfaces.Services.Translation;
 using Lingarr.Server.Models.FileSystem;
+using Lingarr.Server.Services;
 using Lingarr.Server.Services.Translation;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Extensions;
@@ -118,12 +119,14 @@ public class ProofreadJob
 
                     if (!string.IsNullOrWhiteSpace(sourceText) && !string.IsNullOrWhiteSpace(translatedText))
                     {
-                        var proofread = await proofreadService.ProofreadAsync(
+                        // Strip labels a model may copy from the [SOURCE]/[TRANSLATION] prompt into its answer,
+                        // otherwise a correct translation gets overwritten with a labelled one.
+                        var proofread = SubtitleTranslationService.CleanTranslationOutput(await proofreadService.ProofreadAsync(
                             sourceText,
                             translatedText,
                             request.SourceLanguage,
                             request.TargetLanguage,
-                            cancellationToken);
+                            cancellationToken));
 
                         if (!string.IsNullOrWhiteSpace(proofread)
                             && !string.Equals(proofread.Trim(), translatedText.Trim(), StringComparison.Ordinal))
