@@ -50,6 +50,21 @@
                         :validation-type="INPUT_VALIDATION_TYPE.NUMBER"
                         label="Context after"
                         @update:validation="(val) => (isValid.contextAfter = val)" />
+
+                    <div class="flex flex-col space-x-2">
+                        <span class="font-semibold">Use translated lines as context before</span>
+                        When enabled, each line in {contextBefore} that has already been translated
+                        is passed as a [SOURCE] / [TRANSLATION] pair instead of the source text
+                        alone, so the AI can keep names and phrasing consistent with earlier lines.
+                        Lines in {contextAfter} are always source text, as they have not been
+                        translated yet. This only takes effect when {contextBefore} is used in the
+                        user prompt above.
+                    </div>
+                    <ToggleButton v-model="useTranslatedContext">
+                        <span class="text-primary-content text-sm font-medium">
+                            {{ useTranslatedContext == 'true' ? 'Enabled' : 'Disabled' }}
+                        </span>
+                    </ToggleButton>
                 </div>
                 <div v-else class="text-xs">
                     The user prompt is not applied when sending subtitles in batch; the subtitle
@@ -67,6 +82,7 @@ import { INPUT_TYPE, INPUT_VALIDATION_TYPE, PLACEHOLDER, SETTINGS } from '@/ts'
 import CardComponent from '@/components/common/CardComponent.vue'
 import TextAreaComponent from '@/components/common/TextAreaComponent.vue'
 import InputComponent from '@/components/common/InputComponent.vue'
+import ToggleButton from '@/components/common/ToggleButton.vue'
 import SaveNotification from '@/components/common/SaveNotification.vue'
 
 const settingsStore = useSettingStore()
@@ -131,6 +147,14 @@ const contextAfter = computed({
         if (isValid.contextAfter) {
             saveNotification.value?.show()
         }
+    }
+})
+
+const useTranslatedContext = computed({
+    get: () => settingsStore.getSetting(SETTINGS.AI_CONTEXT_USE_TRANSLATED) as string,
+    set: (newValue: string) => {
+        settingsStore.updateSetting(SETTINGS.AI_CONTEXT_USE_TRANSLATED, newValue, true)
+        saveNotification.value?.show()
     }
 })
 </script>

@@ -38,11 +38,29 @@ public class SubtitleTranslationServiceTests
         PlaintextLines = lines.ToList()
     };
 
+    private static SubtitleItem Subtitle(int position, int startTime, int endTime, params string[] lines) => new()
+    {
+        Position = position,
+        StartTime = startTime,
+        EndTime = endTime,
+        Lines = lines.ToList(),
+        PlaintextLines = lines.ToList()
+    };
+
+    /// <summary>
+    /// Mirrors how <c>TranslationRequestService.TranslateContentAsync</c> builds items for the
+    /// <c>/api/translate/content</c> endpoint: no real timestamps, so both are set from Position.
+    /// </summary>
+    private static SubtitleItem ContentLine(int position, string line) => Subtitle(position, position, position, line);
+
+    private sealed record TranslateCall(string Text, List<string>? ContextBefore, List<string>? ContextAfter);
+
     private sealed class PerLineHarness
     {
         public Mock<ITranslationService> TranslationServiceMock { get; init; } = null!;
         public Mock<IProgressService> ProgressServiceMock { get; init; } = null!;
         public SubtitleTranslationService Service { get; init; } = null!;
+        public List<TranslateCall> Calls { get; init; } = [];
     }
 
     private sealed class BatchHarness
@@ -51,8 +69,9 @@ public class SubtitleTranslationServiceTests
         public SubtitleTranslationService Service { get; init; } = null!;
     }
 
-    private static PerLineHarness CreatePerLineHarness(Func<string, string> translate)
+    private static PerLineHarness CreatePerLineHarness(Func<string, string> translate, bool useTranslatedContext = false)
     {
+        var calls = new List<TranslateCall>();
         var translationServiceMock = new Mock<ITranslationService>();
         translationServiceMock
             .Setup(t => t.GetLanguagePair(
@@ -68,7 +87,11 @@ public class SubtitleTranslationServiceTests
                 It.IsAny<List<string>?>(),
                 It.IsAny<List<string>?>(),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync((string text, string _, string _, List<string>? _, List<string>? _, CancellationToken _) => translate(text));
+            .ReturnsAsync((string text, string _, string _, List<string>? before, List<string>? after, CancellationToken _) =>
+            {
+                calls.Add(new TranslateCall(text, before?.ToList(), after?.ToList()));
+                return translate(text);
+            });
 
         var progressServiceMock = new Mock<IProgressService>();
         progressServiceMock
@@ -94,7 +117,9 @@ public class SubtitleTranslationServiceTests
             Service = new SubtitleTranslationService(
                 [new TranslationServiceEntry("test", translationServiceMock.Object, null)],
                 NullLogger.Instance,
-                progressServiceMock.Object)
+                progressServiceMock.Object,
+                useTranslatedContext),
+            Calls = calls
         };
     }
 
@@ -400,6 +425,174 @@ public class SubtitleTranslationServiceTests
 
         // Assert
         Assert.Equal(["Run!", "Watch out!"], captured);
+    }
+
+    #endregion
+
+    #region Context Tests
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOff_ContextIsSourceTextOnBothSides()
+    {
+        // Arrange
+        var harness = CreatePerLineHarness(text => $"tr:{text}");
+        var subtitles = new List<SubtitleItem>
+        {
+            Subtitle(1, "Hello"),
+            Subtitle(2, "How are you"),
+            Subtitle(3, "Fine")
+        };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 2,
+            contextAfter: 1,
+            CancellationToken.None);
+
+        // Assert - identical to the behaviour before the toggle existed
+        Assert.Equal(3, harness.Calls.Count);
+        Assert.Null(harness.Calls[0].ContextBefore);
+        Assert.Equal(["How are you"], harness.Calls[0].ContextAfter);
+        Assert.Equal(["Hello"], harness.Calls[1].ContextBefore);
+        Assert.Equal(["Fine"], harness.Calls[1].ContextAfter);
+        Assert.Equal(["Hello", "How are you"], harness.Calls[2].ContextBefore);
+        Assert.Null(harness.Calls[2].ContextAfter);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOn_PreviouslyTranslatedLinesArePairedSentenceBySentence()
+    {
+        // Arrange
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem>
+        {
+            Subtitle(1, "Hello"),
+            Subtitle(2, "How are you"),
+            Subtitle(3, "Fine")
+        };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 2,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - each earlier line is one [SOURCE]/[TRANSLATION] pair, in order
+        Assert.Equal(3, harness.Calls.Count);
+        Assert.Null(harness.Calls[0].ContextBefore);
+        Assert.Equal(
+            ["[SOURCE] Hello\n[TRANSLATION] tr:Hello"],
+            harness.Calls[1].ContextBefore);
+        Assert.Equal(
+            ["[SOURCE] Hello\n[TRANSLATION] tr:Hello", "[SOURCE] How are you\n[TRANSLATION] tr:How are you"],
+            harness.Calls[2].ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOn_ContextAfterStaysSourceText()
+    {
+        // Arrange
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem>
+        {
+            Subtitle(1, "Hello"),
+            Subtitle(2, "How are you"),
+            Subtitle(3, "Fine")
+        };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 2,
+            CancellationToken.None);
+
+        // Assert - the lines after have not been translated yet, so they are never paired
+        Assert.Equal(["How are you", "Fine"], harness.Calls[0].ContextAfter);
+        Assert.Equal(["Fine"], harness.Calls[1].ContextAfter);
+        Assert.Null(harness.Calls[2].ContextAfter);
+        Assert.Equal(["[SOURCE] How are you\n[TRANSLATION] tr:How are you"], harness.Calls[2].ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOn_ResumedLinesArePairedFromPersistedTranslation()
+    {
+        // Arrange - line 1 was translated in an earlier run and pre-filled the way TranslationJob resumes it
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        var resumed = Subtitle(1, "Hello");
+        resumed.TranslatedLines = ["Hola"];
+        var subtitles = new List<SubtitleItem> { resumed, Subtitle(2, "Fine") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - the persisted translation is used, the line itself is not re-translated
+        Assert.Single(harness.Calls);
+        Assert.Equal("Fine", harness.Calls[0].Text);
+        Assert.Equal(["[SOURCE] Hello\n[TRANSLATION] Hola"], harness.Calls[0].ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOnPreserveLineBreaks_MultiLinePairIsCollapsedToOneLineEachSide()
+    {
+        // Arrange - with preserveLineBreaks the first subtitle is translated line by line, yielding two TranslatedLines
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem>
+        {
+            Subtitle(1, "Hello", "world"),
+            Subtitle(2, "Bye")
+        };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: true,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - both sides of the pair are single lines, so the block structure stays intact
+        Assert.Equal(["tr:Hello", "tr:world"], subtitles[0].TranslatedLines);
+        var byeCall = Assert.Single(harness.Calls, call => call.Text == "Bye");
+        Assert.Equal(["[SOURCE] Hello world\n[TRANSLATION] tr:Hello tr:world"], byeCall.ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_ContentLinesWithPositionTimestamps_RepeatedTextIsTranslatedIndependentlyWithContext()
+    {
+        // Arrange - the /api/translate/content shape: same text on every line, timestamps derived from Position.
+        // Without those timestamps the (Start, End, text) cache key would collapse to "0|0|Yeah." and merge them all.
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem>
+        {
+            ContentLine(1, "Yeah."),
+            ContentLine(2, "Yeah."),
+            ContentLine(3, "Yeah.")
+        };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - three separate calls, each of the later ones carrying the previous line as paired context
+        Assert.Equal(3, harness.Calls.Count);
+        Assert.Null(harness.Calls[0].ContextBefore);
+        Assert.Equal(["[SOURCE] Yeah.\n[TRANSLATION] tr:Yeah."], harness.Calls[1].ContextBefore);
+        Assert.Equal(["[SOURCE] Yeah.\n[TRANSLATION] tr:Yeah."], harness.Calls[2].ContextBefore);
     }
 
     #endregion
