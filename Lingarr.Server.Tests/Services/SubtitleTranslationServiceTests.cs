@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Lingarr.Contracts.Exceptions;
@@ -54,6 +57,16 @@ public class SubtitleTranslationServiceTests
     private static SubtitleItem ContentLine(int position, string line) => Subtitle(position, position, position, line);
 
     private sealed record TranslateCall(string Text, List<string>? ContextBefore, List<string>? ContextAfter);
+
+    private static readonly JsonSerializerOptions ExpectedJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    /// <summary>Expected context entry when translated context is enabled.</summary>
+    private static string ContextJson(int position, string source, string? translation = null) =>
+        JsonSerializer.Serialize(new ContextLine(position, source, translation), ExpectedJsonOptions);
 
     private sealed class PerLineHarness
     {
@@ -481,19 +494,20 @@ public class SubtitleTranslationServiceTests
             contextAfter: 0,
             CancellationToken.None);
 
-        // Assert - each earlier line is one [SOURCE]/[TRANSLATION] pair, in order
+        // Assert - each earlier line is one JSON object with position, source and translation, in order
         Assert.Equal(3, harness.Calls.Count);
         Assert.Null(harness.Calls[0].ContextBefore);
         Assert.Equal(
-            ["[SOURCE] Hello\n[TRANSLATION] tr:Hello"],
+            [ContextJson(1, "Hello", "tr:Hello")],
             harness.Calls[1].ContextBefore);
         Assert.Equal(
-            ["[SOURCE] Hello\n[TRANSLATION] tr:Hello", "[SOURCE] How are you\n[TRANSLATION] tr:How are you"],
+            [ContextJson(1, "Hello", "tr:Hello"), ContextJson(2, "How are you", "tr:How are you")],
             harness.Calls[2].ContextBefore);
+        Assert.Equal("{\"position\":1,\"source\":\"Hello\",\"translation\":\"tr:Hello\"}", harness.Calls[1].ContextBefore![0]);
     }
 
     [Fact]
-    public async Task TranslateSubtitles_TranslatedContextOn_ContextAfterStaysSourceText()
+    public async Task TranslateSubtitles_TranslatedContextOn_ContextAfterIsStructuredWithoutTranslation()
     {
         // Arrange
         var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
@@ -512,11 +526,12 @@ public class SubtitleTranslationServiceTests
             contextAfter: 2,
             CancellationToken.None);
 
-        // Assert - the lines after have not been translated yet, so they are never paired
-        Assert.Equal(["How are you", "Fine"], harness.Calls[0].ContextAfter);
-        Assert.Equal(["Fine"], harness.Calls[1].ContextAfter);
+        // Assert - the lines after have not been translated yet, so they carry position and source only
+        Assert.Equal([ContextJson(2, "How are you"), ContextJson(3, "Fine")], harness.Calls[0].ContextAfter);
+        Assert.Equal([ContextJson(3, "Fine")], harness.Calls[1].ContextAfter);
         Assert.Null(harness.Calls[2].ContextAfter);
-        Assert.Equal(["[SOURCE] How are you\n[TRANSLATION] tr:How are you"], harness.Calls[2].ContextBefore);
+        Assert.Equal("{\"position\":3,\"source\":\"Fine\"}", harness.Calls[1].ContextAfter![0]);
+        Assert.Equal([ContextJson(2, "How are you", "tr:How are you")], harness.Calls[2].ContextBefore);
     }
 
     [Fact]
@@ -539,7 +554,7 @@ public class SubtitleTranslationServiceTests
         // Assert - the persisted translation is used, the line itself is not re-translated
         Assert.Single(harness.Calls);
         Assert.Equal("Fine", harness.Calls[0].Text);
-        Assert.Equal(["[SOURCE] Hello\n[TRANSLATION] Hola"], harness.Calls[0].ContextBefore);
+        Assert.Equal([ContextJson(1, "Hello", "Hola")], harness.Calls[0].ContextBefore);
     }
 
     [Fact]
@@ -564,7 +579,7 @@ public class SubtitleTranslationServiceTests
         // Assert - both sides of the pair are single lines, so the block structure stays intact
         Assert.Equal(["tr:Hello", "tr:world"], subtitles[0].TranslatedLines);
         var byeCall = Assert.Single(harness.Calls, call => call.Text == "Bye");
-        Assert.Equal(["[SOURCE] Hello world\n[TRANSLATION] tr:Hello tr:world"], byeCall.ContextBefore);
+        Assert.Equal([ContextJson(1, "Hello world", "tr:Hello tr:world")], byeCall.ContextBefore);
     }
 
     [Fact]
@@ -591,8 +606,92 @@ public class SubtitleTranslationServiceTests
         // Assert - three separate calls, each of the later ones carrying the previous line as paired context
         Assert.Equal(3, harness.Calls.Count);
         Assert.Null(harness.Calls[0].ContextBefore);
-        Assert.Equal(["[SOURCE] Yeah.\n[TRANSLATION] tr:Yeah."], harness.Calls[1].ContextBefore);
-        Assert.Equal(["[SOURCE] Yeah.\n[TRANSLATION] tr:Yeah."], harness.Calls[2].ContextBefore);
+        Assert.Equal([ContextJson(1, "Yeah.", "tr:Yeah.")], harness.Calls[1].ContextBefore);
+        Assert.Equal([ContextJson(2, "Yeah.", "tr:Yeah.")], harness.Calls[2].ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOn_EmbeddedNewlineAndNonAsciiStayOnOneReadableLine()
+    {
+        // Arrange - a /content line carries the whole multi-line subtitle with a literal newline
+        var harness = CreatePerLineHarness(text => text == "Hello\nworld" ? "你好\n世界" : "再见", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem> { ContentLine(1, "Hello\nworld"), ContentLine(2, "Bye") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - the newline is JSON-escaped so the entry stays one physical line, CJK is not \u-escaped
+        var entry = Assert.Single(harness.Calls[1].ContextBefore!);
+        Assert.Equal("{\"position\":1,\"source\":\"Hello\\nworld\",\"translation\":\"你好\\n世界\"}", entry);
+        Assert.DoesNotContain('\n', entry);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_ModelEchoesLabel_StoredTranslationAndFollowingContextAreClean()
+    {
+        // Arrange - the model copies the [TRANSLATION] label into its answer, as seen with local models
+        var harness = CreatePerLineHarness(text => $"[TRANSLATION] tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem> { Subtitle(1, "Hello"), Subtitle(2, "Bye") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - the label never reaches the stored translation, so it cannot pollute later context
+        Assert.Equal(["tr:Hello"], subtitles[0].TranslatedLines);
+        Assert.Equal(["tr:Bye"], subtitles[1].TranslatedLines);
+        Assert.Equal([ContextJson(1, "Hello", "tr:Hello")], harness.Calls[1].ContextBefore);
+    }
+
+    [Theory]
+    [InlineData("[TRANSLATION]")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task TranslateSubtitles_ModelReturnsNothingUsable_KeepsSourceText(string modelOutput)
+    {
+        // Arrange - a bare label or an empty answer leaves nothing after cleaning
+        var harness = CreatePerLineHarness(_ => modelOutput);
+        var subtitles = new List<SubtitleItem> { Subtitle(1, "Hello") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 0,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - the source line is kept rather than an empty or labelled line
+        Assert.Equal(["Hello"], subtitles[0].TranslatedLines);
+    }
+
+    [Theory]
+    [InlineData("你好", "你好")]
+    [InlineData("  你好  ", "你好")]
+    [InlineData("[TRANSLATION] 你好", "你好")]
+    [InlineData("[translation]: 你好", "你好")]
+    [InlineData("[TRANSLATION] [TRANSLATION] 你好", "你好")]
+    [InlineData("[#12 TRANSLATION] 你好", "你好")]
+    [InlineData("[SOURCE] 你好", "你好")]
+    [InlineData("[Target-to-Translate]\n你好", "你好")]
+    [InlineData("{\"translation\":\"你好\"}", "你好")]
+    [InlineData("{\"position\":3,\"line\":\"你好\"}", "你好")]
+    [InlineData("[MUSIC] 你好", "[MUSIC] 你好")]
+    [InlineData("[LAUGHS]", "[LAUGHS]")]
+    [InlineData("ho\nla", "ho\nla")]
+    [InlineData("{not json", "{not json")]
+    public void CleanTranslationOutput_RemovesPromptArtefactsOnly(string raw, string expected)
+    {
+        Assert.Equal(expected, SubtitleTranslationService.CleanTranslationOutput(raw));
     }
 
     #endregion

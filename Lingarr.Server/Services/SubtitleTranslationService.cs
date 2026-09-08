@@ -1,3 +1,7 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Lingarr.Contracts.Exceptions;
 using Lingarr.Contracts.Models;
 using Lingarr.Contracts.Models.Batch;
@@ -14,6 +18,25 @@ namespace Lingarr.Server.Services;
 public class SubtitleTranslationService
 {
     private const int MaxLineLength = 42;
+
+    /// <summary>
+    /// Keeps non-ASCII text readable in context lines instead of \uXXXX escapes, and drops the
+    /// translation property for lines that do not have one yet.
+    /// </summary>
+    private static readonly JsonSerializerOptions ContextLineJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    /// <summary>
+    /// A prompt-structure label a model may copy to the start of its answer, such as
+    /// "[TRANSLATION] ", "[SOURCE #12] " or "[Target-to-Translate]: ".
+    /// </summary>
+    private static readonly Regex LeadingContextLabel = new(
+        @"^\[\s*(?:#?\d+\s*)?(?:TRANSLATION|SOURCE|TARGET(?:-TO-TRANSLATE)?)\s*(?:#?\d+)?\s*\]\s*:?\s*",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private int _lastProgression = -1;
     private readonly IReadOnlyList<TranslationServiceEntry> _services;
     private readonly IProgressService? _progressService;
@@ -28,9 +51,9 @@ public class SubtitleTranslationService
     /// <param name="logger">Logger for progress and fallback diagnostics.</param>
     /// <param name="progressService">Progress reporter, required by <see cref="TranslateSubtitles"/> and <see cref="TranslateSubtitlesBatch"/>.</param>
     /// <param name="useTranslatedContext">
-    /// When true, each already-translated line in the "before" context is passed as a
-    /// <c>[SOURCE]</c> / <c>[TRANSLATION]</c> pair instead of the source text alone. Lines that
-    /// have no translation yet, and the "after" context, are always passed as source text.
+    /// When true, context lines are passed as one JSON object per line carrying the position and
+    /// source text, plus the translation for lines that already have one (see <see cref="ContextLine"/>).
+    /// When false, context lines are passed as plain source text.
     /// </param>
     public SubtitleTranslationService(
         IReadOnlyList<TranslationServiceEntry> services,
@@ -213,7 +236,24 @@ public class SubtitleTranslationService
                     translateAbleSubtitle.ContextLinesAfter,
                     cancellationToken);
                 LogFallback(candidate, translateAbleSubtitle.SourceLanguage, translateAbleSubtitle.TargetLanguage);
-                return (translated, candidate.Entry.Name, candidate.Pair);
+
+                var cleaned = CleanTranslationOutput(translated);
+                if (string.IsNullOrWhiteSpace(cleaned))
+                {
+                    // Same fallback as the batch path: an untranslated line is visible and self-explanatory,
+                    // an empty line or a failed job is not.
+                    _logger.LogWarning(
+                        "Model returned no usable translation for line {Line} (raw output: {Raw}); keeping the source text.",
+                        translateAbleSubtitle.SubtitleLine, translated);
+                    cleaned = translateAbleSubtitle.SubtitleLine;
+                }
+                else if (cleaned != translated.Trim())
+                {
+                    _logger.LogInformation(
+                        "Removed a prompt label or JSON wrapper from the model output for line: {Line}",
+                        translateAbleSubtitle.SubtitleLine);
+                }
+                return (cleaned, candidate.Entry.Name, candidate.Pair);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -507,10 +547,10 @@ public class SubtitleTranslationService
     /// <param name="stripSubtitleFormatting">Whether to strip formatting from subtitles.</param>
     /// <param name="isBeforeContext">If true, builds context before the index; otherwise, builds after.</param>
     /// <remarks>
-    /// With <c>useTranslatedContext</c> enabled, a "before" line that already carries a translation is
-    /// rendered as a <c>[SOURCE]</c> / <c>[TRANSLATION]</c> pair so the model sees how earlier lines
-    /// were translated. Lines without a translation fall back to source text, and the "after" context
-    /// is always source text because those lines have not been translated yet.
+    /// With <c>useTranslatedContext</c> enabled every context line becomes one JSON object
+    /// (<see cref="ContextLine"/>) with its position and source text; "before" lines that already
+    /// carry a translation include it, so the model sees how earlier lines were translated. "After"
+    /// lines never have a translation yet. With the option disabled, lines are plain source text.
     /// </remarks>
     private List<string> BuildContext(
         List<SubtitleItem> subtitles, 
@@ -535,17 +575,65 @@ public class SubtitleTranslationService
             var sourceText = string.Join(" ",
                 stripSubtitleFormatting ? contextSubtitle.PlaintextLines : contextSubtitle.Lines);
 
-            if (_useTranslatedContext && isBeforeContext && contextSubtitle.TranslatedLines.Count > 0)
+            if (!_useTranslatedContext)
             {
-                var translatedText = string.Join(" ", contextSubtitle.TranslatedLines);
-                context.Add($"[SOURCE] {sourceText}\n[TRANSLATION] {translatedText}");
+                context.Add(sourceText);
                 continue;
             }
 
-            context.Add(sourceText);
+            var translatedText = isBeforeContext && contextSubtitle.TranslatedLines.Count > 0
+                ? string.Join(" ", contextSubtitle.TranslatedLines)
+                : null;
+            context.Add(JsonSerializer.Serialize(
+                new ContextLine(contextSubtitle.Position, sourceText, translatedText),
+                ContextLineJsonOptions));
         }
 
         return context.Count > 0 ? context : [];
+    }
+
+    /// <summary>
+    /// Removes artefacts a model may copy from the prompt structure into its answer: leading
+    /// <c>[TRANSLATION]</c> / <c>[SOURCE]</c> / <c>[Target-to-Translate]</c> labels, and a JSON
+    /// object wrapping the translation. Without this an echoed label is stored as the translation
+    /// and fed back into the context of every following line.
+    /// </summary>
+    /// <param name="translated">The raw model output.</param>
+    /// <returns>The trimmed output with any leading label or JSON wrapper removed.</returns>
+    public static string CleanTranslationOutput(string translated)
+    {
+        var cleaned = translated.Trim();
+
+        while (true)
+        {
+            var stripped = LeadingContextLabel.Replace(cleaned, string.Empty, 1);
+            if (stripped.Length == cleaned.Length)
+            {
+                break;
+            }
+            cleaned = stripped.TrimStart();
+        }
+
+        if (cleaned.StartsWith('{') && cleaned.EndsWith('}'))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(cleaned);
+                if (document.RootElement.ValueKind == JsonValueKind.Object
+                    && (document.RootElement.TryGetProperty("translation", out var value)
+                        || document.RootElement.TryGetProperty("line", out value))
+                    && value.ValueKind == JsonValueKind.String)
+                {
+                    cleaned = value.GetString()!.Trim();
+                }
+            }
+            catch (JsonException)
+            {
+                // Not a JSON object after all, keep the text as it is.
+            }
+        }
+
+        return cleaned;
     }
 
     /// <summary>

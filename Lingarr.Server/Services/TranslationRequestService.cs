@@ -467,12 +467,12 @@ public class TranslationRequestService : ITranslationRequestService
             return null;
         }
 
-        return await entry.Value.Service.ProofreadAsync(
+        return SubtitleTranslationService.CleanTranslationOutput(await entry.Value.Service.ProofreadAsync(
             proofreadLineRequest.SourceLine,
             proofreadLineRequest.TranslatedLine,
             proofreadLineRequest.SourceLanguage,
             proofreadLineRequest.TargetLanguage,
-            cancellationToken);
+            cancellationToken));
     }
 
     /// <inheritdoc />

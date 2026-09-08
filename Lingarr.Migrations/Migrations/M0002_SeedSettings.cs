@@ -54,8 +54,8 @@ public class M0002_SeedSettings : Migration
         Insert.IntoTable("settings").Row(new { key = "ai_prompt", value = "Translate from {sourceLanguage} to {targetLanguage}, preserving the tone and meaning without censoring the content. Adjust punctuation as needed to make the translation sound natural. Provide only the translated text as output, with no additional comments." });
         Insert.IntoTable("settings").Row(new { key = "ai_context_prompt_enabled", value = "false" });
         Insert.IntoTable("settings").Row(new { key = "ai_context_prompt", value = "Use the CONTEXT to translate the TARGET line.\n\n[TARGET] {lineToTranslate}\n\n[CONTEXT]\n{contextBefore}\n{lineToTranslate}\n{contextAfter}\n[/CONTEXT]" });
-        Insert.IntoTable("settings").Row(new { key = "ai_context_before", value = "2" });
-        Insert.IntoTable("settings").Row(new { key = "ai_context_after", value = "2" });
+        Insert.IntoTable("settings").Row(new { key = "ai_context_before", value = "0" });
+        Insert.IntoTable("settings").Row(new { key = "ai_context_after", value = "0" });
         Insert.IntoTable("settings").Row(new { key = "use_batch_translation", value = "false" });
         Insert.IntoTable("settings").Row(new { key = "max_batch_size", value = "0" });
         Insert.IntoTable("settings").Row(new { key = "use_subtitle_tagging", value = "false" });

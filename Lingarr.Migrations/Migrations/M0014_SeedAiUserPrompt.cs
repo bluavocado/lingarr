@@ -5,9 +5,24 @@ namespace Lingarr.Migrations.Migrations;
 [Migration(14)]
 public class M0014_SeedAiUserPrompt : Migration
 {
+    /// <summary>
+    /// Default user prompt for new installations: the line to translate framed by its context, with
+    /// the instructions last so they sit closest to the model's answer. Existing rows are never
+    /// changed by this migration, so upgraded installations keep whatever prompt they had.
+    /// </summary>
+    private const string DefaultUserPrompt =
+        "[Context-Before]\n{contextBefore}\n\n" +
+        "[Context-After]\n{contextAfter}\n\n" +
+        "[Target-to-Translate]\n{lineToTranslate}\n\n" +
+        "Translate only the text under [Target-to-Translate]. The lines under [Context-Before] and [Context-After] " +
+        "are neighbouring subtitle lines for context only: use them to keep names, terms and tone consistent, " +
+        "and never translate or repeat them. When a [Context-Before] entry includes a \"translation\" field, " +
+        "follow that earlier translation. Reply with the translated target text alone, as plain text, " +
+        "without labels, JSON or position numbers.";
+
     public override void Up()
     {
-        Insert.IntoTable("settings").Row(new { key = "ai_user_prompt", value = "{lineToTranslate}" });
+        Insert.IntoTable("settings").Row(new { key = "ai_user_prompt", value = DefaultUserPrompt });
 
         IfDatabase("sqlite", "postgresql").Execute.Sql("""
             UPDATE settings SET "value" =
