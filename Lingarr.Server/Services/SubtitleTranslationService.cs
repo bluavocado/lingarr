@@ -18,15 +18,25 @@ public class SubtitleTranslationService
     private readonly IReadOnlyList<TranslationServiceEntry> _services;
     private readonly IProgressService? _progressService;
     private readonly ILogger _logger;
+    private readonly bool _useTranslatedContext;
     private readonly Dictionary<int, (string Service, LanguagePair Pair)> _translationByPosition = [];
     private readonly HashSet<string> _loggedSkips = [];
     private readonly HashSet<TranslationCandidate> _loggedFallbacks = [];
     private readonly Dictionary<(string Source, string Target), IReadOnlyList<TranslationCandidate>> _candidatesByPair = [];
 
+    /// <param name="services">Ordered translation service chain; the first entry is the primary, the rest are fallbacks.</param>
+    /// <param name="logger">Logger for progress and fallback diagnostics.</param>
+    /// <param name="progressService">Progress reporter, required by <see cref="TranslateSubtitles"/> and <see cref="TranslateSubtitlesBatch"/>.</param>
+    /// <param name="useTranslatedContext">
+    /// When true, each already-translated line in the "before" context is passed as a
+    /// <c>[SOURCE]</c> / <c>[TRANSLATION]</c> pair instead of the source text alone. Lines that
+    /// have no translation yet, and the "after" context, are always passed as source text.
+    /// </param>
     public SubtitleTranslationService(
         IReadOnlyList<TranslationServiceEntry> services,
         ILogger logger,
-        IProgressService? progressService = null)
+        IProgressService? progressService = null,
+        bool useTranslatedContext = false)
     {
         if (services.Count == 0)
         {
@@ -35,6 +45,7 @@ public class SubtitleTranslationService
         _services = services;
         _progressService = progressService;
         _logger = logger;
+        _useTranslatedContext = useTranslatedContext;
     }
 
     private readonly record struct TranslationCandidate(TranslationServiceEntry Entry, LanguagePair Pair, int ChainIndex);
@@ -495,7 +506,13 @@ public class SubtitleTranslationService
     /// <param name="count">The number of subtitles to include before or after the index.</param>
     /// <param name="stripSubtitleFormatting">Whether to strip formatting from subtitles.</param>
     /// <param name="isBeforeContext">If true, builds context before the index; otherwise, builds after.</param>
-    private static List<string> BuildContext(
+    /// <remarks>
+    /// With <c>useTranslatedContext</c> enabled, a "before" line that already carries a translation is
+    /// rendered as a <c>[SOURCE]</c> / <c>[TRANSLATION]</c> pair so the model sees how earlier lines
+    /// were translated. Lines without a translation fall back to source text, and the "after" context
+    /// is always source text because those lines have not been translated yet.
+    /// </remarks>
+    private List<string> BuildContext(
         List<SubtitleItem> subtitles, 
         int startIndex, 
         int count,
@@ -515,8 +532,17 @@ public class SubtitleTranslationService
         for (var i = start; i < end; i++)
         {
             var contextSubtitle = subtitles[i];
-            context.Add(string.Join(" ",
-                stripSubtitleFormatting ? contextSubtitle.PlaintextLines : contextSubtitle.Lines));
+            var sourceText = string.Join(" ",
+                stripSubtitleFormatting ? contextSubtitle.PlaintextLines : contextSubtitle.Lines);
+
+            if (_useTranslatedContext && isBeforeContext && contextSubtitle.TranslatedLines.Count > 0)
+            {
+                var translatedText = string.Join(" ", contextSubtitle.TranslatedLines);
+                context.Add($"[SOURCE] {sourceText}\n[TRANSLATION] {translatedText}");
+                continue;
+            }
+
+            context.Add(sourceText);
         }
 
         return context.Count > 0 ? context : [];

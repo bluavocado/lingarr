@@ -38,7 +38,7 @@ Both templates accept the same placeholders:
 | **Placeholder** | **Value** |
 |-----------------|-----------|
 | `{lineToTranslate}` | The subtitle line being translated. |
-| `{contextBefore}` | The lines preceding it, as many as the context setting allows. Empty when that setting is `0`. |
+| `{contextBefore}` | The lines preceding it, as many as the context setting allows. Empty when that setting is `0`. With **Use translated lines as context before** enabled, each of those lines that has already been translated is rendered as a `[SOURCE]` / `[TRANSLATION]` pair instead of the source text alone. |
 | `{contextAfter}` | The lines following it, as many as the context setting allows. Empty when that setting is `0`. |
 | `{sourceLanguage}` | The language being translated from. |
 | `{targetLanguage}` | The language being translated to. |
