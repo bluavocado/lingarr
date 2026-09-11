@@ -44,9 +44,11 @@ Every provider class must be marked with:
 The identifier is used internally and is what users select in the Services settings page.
 Every plugin must also declare the plugin API version:
 ```csharp
-[assembly: LingarrPluginApiVersion(1, 0)]
+[assembly: LingarrPluginApiVersion(1, 1)]
 ```
-This version is based on `Lingarr.Contracts`, not the main Lingarr version.
+This version is based on `Lingarr.Contracts`, not the main Lingarr version. The loader only checks the major version, so a plugin built against 1.0 keeps loading; the minor version tells you which additions the contract has:
+
+- **1.1**: the `contextLinesBefore` / `contextLinesAfter` arguments of `TranslateAsync` may carry JSON objects instead of plain lines when the user enables the *Structured context with translations* setting. Each entry is then a serialised `Lingarr.Contracts.Models.ContextLine` (`position`, `line`, and `translation` for lines already translated). Plugins that do not need the structure can keep passing the entries through as text.
 
 ## How plugins are loaded
 

@@ -71,7 +71,7 @@ The plugin accepts standard language codes (`en`, `nl`, `ja`, etc.). If a langua
 2. Reference `Lingarr.Contracts`
 3. Implement `ITranslationService` on a class marked with `[PluginProvider("your_identifier")]`.
 4. Create one `IPluginManifest` 
-5. Add `[assembly: LingarrPluginApiVersion(1, 0)]` to the assembly.
+5. Add `[assembly: LingarrPluginApiVersion(1, 1)]` to the assembly.
 6. Build and place the DLLs in the plugins folder.
 
 ## Reserved provider identifiers

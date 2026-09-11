@@ -51,15 +51,12 @@
                         label="Context after"
                         @update:validation="(val) => (isValid.contextAfter = val)" />
 
-                    <div class="flex flex-col space-x-2">
-                        <span class="font-semibold">Use translated lines as context before</span>
-                        When enabled, every line in {contextBefore} and {contextAfter} is passed as
-                        one JSON object per line with its position and source text, and lines that
-                        are already translated also carry their translation, for example
-                        {"position":12,"source":"Hold it!","translation":"Wacht even!"}. This lets
-                        the AI keep names and phrasing consistent with earlier lines. It only takes
-                        effect when the placeholders are used in the user prompt above; the default
-                        user prompt layout already does this.
+                    <div class="flex flex-col">
+                        <span class="font-semibold">Structured context with translations</span>
+                        Sends {contextBefore} and {contextAfter} as one JSON object per line with
+                        its position and text, plus the translation for lines that are already
+                        translated, so the AI can keep names and terms consistent. Only applies when
+                        the placeholders are used in the user prompt.
                     </div>
                     <ToggleButton v-model="useTranslatedContext">
                         <span class="text-primary-content text-sm font-medium">
