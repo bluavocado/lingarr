@@ -31,7 +31,9 @@ Each request is built from two templates, and both apply to every AI service.
 
 `AI_PROMPT` is the system prompt. It carries the standing instruction on how to translate, and is sent as the system message. Lingarr seeds a default on first run. Clearing it sends an empty system message, leaving the service without translation instructions, so keep a value set.
 
-`AI_USER_PROMPT` is the user message. It carries the line being translated, and is sent as the user message. When it is left empty, the line is sent unchanged. New installations start with the layout below, which frames the line with its context and keeps the instructions closest to the answer; installations upgraded from earlier versions keep their existing prompt (`{lineToTranslate}` unless changed), so copy this in if you want the same layout:
+`AI_USER_PROMPT` is the user message. It carries the line being translated, and is sent as the user message. The default is `{lineToTranslate}`, the subtitle line on its own. When it is left empty, the line is sent unchanged.
+
+A recommended layout when using context frames the line with its neighbours and keeps the instructions closest to the answer:
 
 ```
 [Context-Before]
@@ -46,20 +48,20 @@ Each request is built from two templates, and both apply to every AI service.
 Translate only the text under [Target-to-Translate]. The lines under [Context-Before] and [Context-After] are neighbouring subtitle lines for context only: use them to keep names, terms and tone consistent, and never translate or repeat them. When a [Context-Before] entry includes a "translation" field, follow that earlier translation. Reply with the translated target text alone, as plain text, without labels, JSON or position numbers.
 ```
 
-The two context sections stay empty until the context settings are raised above `0`.
+The two context sections are empty while the context settings are `0`.
 
 Both templates accept the same placeholders:
 
 | **Placeholder** | **Value** |
 |-----------------|-----------|
 | `{lineToTranslate}` | The subtitle line being translated. |
-| `{contextBefore}` | The lines preceding it, as many as the context setting allows. Empty when that setting is `0`. With **Use translated lines as context before** enabled, each line is one JSON object with `position`, `source` and, once the line has been translated, `translation`, for example `{"position":12,"source":"Hold it!","translation":"Wacht even!"}`. |
-| `{contextAfter}` | The lines following it, as many as the context setting allows. Empty when that setting is `0`. With the same option enabled, each line is one JSON object with `position` and `source`. |
+| `{contextBefore}` | The lines preceding it, as many as the context setting allows. Empty when that setting is `0`. With **Structured context with translations** enabled, each line is one JSON object with `position`, `line` and, once the line has been translated, `translation`, for example `{"position":12,"line":"Hold it!","translation":"Wacht even!"}`. |
+| `{contextAfter}` | The lines following it, as many as the context setting allows. Empty when that setting is `0`. With the same option enabled, each line is one JSON object with `position` and `line`. |
 | `{sourceLanguage}` | The language being translated from. |
 | `{targetLanguage}` | The language being translated to. |
 | `{model}` | The configured model. |
 
-Use the user prompt to frame a single line, for example to surround it with its context so the service can see where the line sits. If a model copies a label such as `[TRANSLATION]` or a JSON wrapper into its answer, Lingarr strips it before storing the translation, so it cannot leak into the context of the following lines.
+Use the user prompt to frame a single line, for example to surround it with its context so the service can see where the line sits.
 
 Batch translation does not use the user prompt. The batch is sent as the user message instead, so only `AI_PROMPT` applies when batching is enabled.
 
@@ -74,7 +76,7 @@ You can run it two ways:
 - **Whole request.** On the translations list, a `Completed` request with a translated subtitle shows a Proofread action beside Retry, Resume and Remove. This queues a job that proofreads every line and rewrites the translated subtitle file in place once it finishes. Lingarr keeps no copy of the pre-proofread text, in the file or in the database, so there is nothing to revert to afterwards.
 - **Single line.** On the translation detail page, each line has its own Proofread button. It fetches a suggested correction for that line, shows it inline, and you apply or dismiss it.
 
-A whole-request proofread calls the AI service once per subtitle line, the same as a non-batch translation, batching does not apply. Proofreading a long subtitle track costs roughly as much as translating it again. A proofread answer is cleaned the same way as a translation: a `[TRANSLATION]` label or JSON wrapper copied from the prompt is stripped before the line is compared and stored.
+A whole-request proofread calls the AI service once per subtitle line, the same as a non-batch translation, batching does not apply. Proofreading a long subtitle track costs roughly as much as translating it again.
 
 The subtitle file is rewritten only after every line has been checked, so cancelling a proofread, or restarting Lingarr while one is running, leaves the existing translation and its file exactly as they were. The request returns to `Completed` and can be proofread again.
 

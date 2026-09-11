@@ -52,9 +52,9 @@ public class SubtitleTranslationServiceTests
 
     /// <summary>
     /// Mirrors how <c>TranslationRequestService.TranslateContentAsync</c> builds items for the
-    /// <c>/api/translate/content</c> endpoint: no real timestamps, so both are set from Position.
+    /// <c>/api/translate/content</c> endpoint: position and text only, no timing information.
     /// </summary>
-    private static SubtitleItem ContentLine(int position, string line) => Subtitle(position, position, position, line);
+    private static SubtitleItem ContentLine(int position, string line) => Subtitle(position, line);
 
     private sealed record TranslateCall(string Text, List<string>? ContextBefore, List<string>? ContextAfter);
 
@@ -65,8 +65,8 @@ public class SubtitleTranslationServiceTests
     };
 
     /// <summary>Expected context entry when translated context is enabled.</summary>
-    private static string ContextJson(int position, string source, string? translation = null) =>
-        JsonSerializer.Serialize(new ContextLine(position, source, translation), ExpectedJsonOptions);
+    private static string ContextJson(int position, string line, string? translation = null) =>
+        JsonSerializer.Serialize(new ContextLine { Position = position, Line = line, Translation = translation }, ExpectedJsonOptions);
 
     private sealed class PerLineHarness
     {
@@ -82,7 +82,10 @@ public class SubtitleTranslationServiceTests
         public SubtitleTranslationService Service { get; init; } = null!;
     }
 
-    private static PerLineHarness CreatePerLineHarness(Func<string, string> translate, bool useTranslatedContext = false)
+    private static PerLineHarness CreatePerLineHarness(
+        Func<string, string> translate,
+        bool useTranslatedContext = false,
+        bool mergeStackedLines = true)
     {
         var calls = new List<TranslateCall>();
         var translationServiceMock = new Mock<ITranslationService>();
@@ -131,7 +134,8 @@ public class SubtitleTranslationServiceTests
                 [new TranslationServiceEntry("test", translationServiceMock.Object, null)],
                 NullLogger.Instance,
                 progressServiceMock.Object,
-                useTranslatedContext),
+                useTranslatedContext,
+                mergeStackedLines),
             Calls = calls
         };
     }
@@ -503,7 +507,7 @@ public class SubtitleTranslationServiceTests
         Assert.Equal(
             [ContextJson(1, "Hello", "tr:Hello"), ContextJson(2, "How are you", "tr:How are you")],
             harness.Calls[2].ContextBefore);
-        Assert.Equal("{\"position\":1,\"source\":\"Hello\",\"translation\":\"tr:Hello\"}", harness.Calls[1].ContextBefore![0]);
+        Assert.Equal("{\"position\":1,\"line\":\"Hello\",\"translation\":\"tr:Hello\"}", harness.Calls[1].ContextBefore![0]);
     }
 
     [Fact]
@@ -530,7 +534,7 @@ public class SubtitleTranslationServiceTests
         Assert.Equal([ContextJson(2, "How are you"), ContextJson(3, "Fine")], harness.Calls[0].ContextAfter);
         Assert.Equal([ContextJson(3, "Fine")], harness.Calls[1].ContextAfter);
         Assert.Null(harness.Calls[2].ContextAfter);
-        Assert.Equal("{\"position\":3,\"source\":\"Fine\"}", harness.Calls[1].ContextAfter![0]);
+        Assert.Equal("{\"position\":3,\"line\":\"Fine\"}", harness.Calls[1].ContextAfter![0]);
         Assert.Equal([ContextJson(2, "How are you", "tr:How are you")], harness.Calls[2].ContextBefore);
     }
 
@@ -583,11 +587,11 @@ public class SubtitleTranslationServiceTests
     }
 
     [Fact]
-    public async Task TranslateSubtitles_ContentLinesWithPositionTimestamps_RepeatedTextIsTranslatedIndependentlyWithContext()
+    public async Task TranslateSubtitles_MergeStackedLinesOff_RepeatedTextIsTranslatedIndependentlyWithContext()
     {
-        // Arrange - the /api/translate/content shape: same text on every line, timestamps derived from Position.
-        // Without those timestamps the (Start, End, text) cache key would collapse to "0|0|Yeah." and merge them all.
-        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true);
+        // Arrange - the /api/translate/content shape: same text on every line and no timing information.
+        // With merging opted out every line is its own request and carries its own context.
+        var harness = CreatePerLineHarness(text => $"tr:{text}", useTranslatedContext: true, mergeStackedLines: false);
         var subtitles = new List<SubtitleItem>
         {
             ContentLine(1, "Yeah."),
@@ -603,11 +607,52 @@ public class SubtitleTranslationServiceTests
             contextAfter: 0,
             CancellationToken.None);
 
-        // Assert - three separate calls, each of the later ones carrying the previous line as paired context
+        // Assert - three separate calls, each of the later ones carrying the previous line as context
         Assert.Equal(3, harness.Calls.Count);
         Assert.Null(harness.Calls[0].ContextBefore);
         Assert.Equal([ContextJson(1, "Yeah.", "tr:Yeah.")], harness.Calls[1].ContextBefore);
         Assert.Equal([ContextJson(2, "Yeah.", "tr:Yeah.")], harness.Calls[2].ContextBefore);
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_MergeStackedLinesOn_UntimedRepeatedTextIsStillMerged()
+    {
+        // Arrange - the default keeps the stacked-layer merge, so lines that share (0, 0, text) are reused
+        var captured = new List<string>();
+        var harness = CreatePerLineHarness(text => { captured.Add(text); return "tr:Yeah."; });
+        var subtitles = new List<SubtitleItem> { ContentLine(1, "Yeah."), ContentLine(2, "Yeah.") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 0,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert
+        Assert.Single(captured);
+        Assert.All(subtitles, s => Assert.Equal(["tr:Yeah."], s.TranslatedLines));
+    }
+
+    [Fact]
+    public async Task TranslateSubtitles_TranslatedContextOn_EmptyStoredTranslationIsPassedWithoutTranslationField()
+    {
+        // Arrange - the model answers nothing for the first line; that must not become an example for the next one
+        var harness = CreatePerLineHarness(text => text == "Hello" ? "" : $"tr:{text}", useTranslatedContext: true);
+        var subtitles = new List<SubtitleItem> { Subtitle(1, "Hello"), Subtitle(2, "Bye") };
+
+        // Act
+        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
+            stripSubtitleFormatting: false,
+            preserveLineBreaks: false,
+            contextBefore: 1,
+            contextAfter: 0,
+            CancellationToken.None);
+
+        // Assert - stored as empty, passed on like an untranslated line
+        Assert.Equal([""], subtitles[0].TranslatedLines);
+        Assert.Equal([ContextJson(1, "Hello")], harness.Calls[1].ContextBefore);
     }
 
     [Fact]
@@ -627,71 +672,8 @@ public class SubtitleTranslationServiceTests
 
         // Assert - the newline is JSON-escaped so the entry stays one physical line, CJK is not \u-escaped
         var entry = Assert.Single(harness.Calls[1].ContextBefore!);
-        Assert.Equal("{\"position\":1,\"source\":\"Hello\\nworld\",\"translation\":\"你好\\n世界\"}", entry);
+        Assert.Equal("{\"position\":1,\"line\":\"Hello\\nworld\",\"translation\":\"你好\\n世界\"}", entry);
         Assert.DoesNotContain('\n', entry);
-    }
-
-    [Fact]
-    public async Task TranslateSubtitles_ModelEchoesLabel_StoredTranslationAndFollowingContextAreClean()
-    {
-        // Arrange - the model copies the [TRANSLATION] label into its answer, as seen with local models
-        var harness = CreatePerLineHarness(text => $"[TRANSLATION] tr:{text}", useTranslatedContext: true);
-        var subtitles = new List<SubtitleItem> { Subtitle(1, "Hello"), Subtitle(2, "Bye") };
-
-        // Act
-        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
-            stripSubtitleFormatting: false,
-            preserveLineBreaks: false,
-            contextBefore: 1,
-            contextAfter: 0,
-            CancellationToken.None);
-
-        // Assert - the label never reaches the stored translation, so it cannot pollute later context
-        Assert.Equal(["tr:Hello"], subtitles[0].TranslatedLines);
-        Assert.Equal(["tr:Bye"], subtitles[1].TranslatedLines);
-        Assert.Equal([ContextJson(1, "Hello", "tr:Hello")], harness.Calls[1].ContextBefore);
-    }
-
-    [Theory]
-    [InlineData("[TRANSLATION]")]
-    [InlineData("")]
-    [InlineData("   ")]
-    public async Task TranslateSubtitles_ModelReturnsNothingUsable_KeepsSourceText(string modelOutput)
-    {
-        // Arrange - a bare label or an empty answer leaves nothing after cleaning
-        var harness = CreatePerLineHarness(_ => modelOutput);
-        var subtitles = new List<SubtitleItem> { Subtitle(1, "Hello") };
-
-        // Act
-        await harness.Service.TranslateSubtitles(subtitles, NewRequest(),
-            stripSubtitleFormatting: false,
-            preserveLineBreaks: false,
-            contextBefore: 0,
-            contextAfter: 0,
-            CancellationToken.None);
-
-        // Assert - the source line is kept rather than an empty or labelled line
-        Assert.Equal(["Hello"], subtitles[0].TranslatedLines);
-    }
-
-    [Theory]
-    [InlineData("你好", "你好")]
-    [InlineData("  你好  ", "你好")]
-    [InlineData("[TRANSLATION] 你好", "你好")]
-    [InlineData("[translation]: 你好", "你好")]
-    [InlineData("[TRANSLATION] [TRANSLATION] 你好", "你好")]
-    [InlineData("[#12 TRANSLATION] 你好", "你好")]
-    [InlineData("[SOURCE] 你好", "你好")]
-    [InlineData("[Target-to-Translate]\n你好", "你好")]
-    [InlineData("{\"translation\":\"你好\"}", "你好")]
-    [InlineData("{\"position\":3,\"line\":\"你好\"}", "你好")]
-    [InlineData("[MUSIC] 你好", "[MUSIC] 你好")]
-    [InlineData("[LAUGHS]", "[LAUGHS]")]
-    [InlineData("ho\nla", "ho\nla")]
-    [InlineData("{not json", "{not json")]
-    public void CleanTranslationOutput_RemovesPromptArtefactsOnly(string raw, string expected)
-    {
-        Assert.Equal(expected, SubtitleTranslationService.CleanTranslationOutput(raw));
     }
 
     #endregion

@@ -467,12 +467,12 @@ public class TranslationRequestService : ITranslationRequestService
             return null;
         }
 
-        return SubtitleTranslationService.CleanTranslationOutput(await entry.Value.Service.ProofreadAsync(
+        return await entry.Value.Service.ProofreadAsync(
             proofreadLineRequest.SourceLine,
             proofreadLineRequest.TranslatedLine,
             proofreadLineRequest.SourceLanguage,
             proofreadLineRequest.TargetLanguage,
-            cancellationToken));
+            cancellationToken);
     }
 
     /// <inheritdoc />
@@ -822,14 +822,9 @@ public class TranslationRequestService : ITranslationRequestService
             _asyncTranslationJobs.TryAdd(translationRequest.Id, cancellationTokenSource);
 
 
-            // Content lines carry no timestamps. StartTime/EndTime are set from Position on purpose:
-            // TranslateSubtitles de-duplicates on (StartTime, EndTime, text) to collapse stacked .ass
-            // layers, and leaving both at 0 would merge every repeated line across the whole request.
             var subtitleItems = translateAbleContent.Lines.Select(item => new SubtitleItem
             {
                 Position = item.Position,
-                StartTime = item.Position,
-                EndTime = item.Position,
                 Lines = new List<string> { item.Line },
                 PlaintextLines = new List<string> { item.Line }
             }).ToList();
@@ -889,7 +884,10 @@ public class TranslationRequestService : ITranslationRequestService
                     contextAfter,
                     useTranslatedContext);
 
-                var subtitleTranslator = new SubtitleTranslationService(services, _logger, _progressService, useTranslatedContext);
+                // Content lines carry no timing information, so nothing can be stacked: opt out of the
+                // merge that collapses same-timed .ass layers, otherwise every repeated line would be reused.
+                var subtitleTranslator = new SubtitleTranslationService(
+                    services, _logger, _progressService, useTranslatedContext, mergeStackedLines: false);
 
                 await subtitleTranslator.TranslateSubtitles(
                     subtitleItems,
