@@ -19,6 +19,23 @@ public class SubtitleTranslationService
     private const int MaxLineLength = 42;
 
     /// <summary>
+    /// The wire shape of one context line when structured context is enabled: the position, the
+    /// line text, and the translation for lines that already have one. Written only, Lingarr never
+    /// reads it back; the shape is documented for plugin authors in the plugin docs.
+    /// </summary>
+    private sealed class ContextLine
+    {
+        [JsonPropertyName("position")]
+        public int Position { get; init; }
+
+        [JsonPropertyName("line")]
+        public string Line { get; init; } = string.Empty;
+
+        [JsonPropertyName("translation")]
+        public string? Translation { get; init; }
+    }
+
+    /// <summary>
     /// Keeps non-ASCII text readable in context lines instead of \uXXXX escapes, and drops the
     /// translation property for lines that do not have one yet.
     /// </summary>
@@ -44,7 +61,7 @@ public class SubtitleTranslationService
     /// <param name="progressService">Progress reporter, required by <see cref="TranslateSubtitles"/> and <see cref="TranslateSubtitlesBatch"/>.</param>
     /// <param name="useTranslatedContext">
     /// When true, context lines are passed as one JSON object per line carrying the position and
-    /// source text, plus the translation for lines that already have one (see <see cref="ContextLine"/>).
+    /// line text, plus the translation for lines that already have one.
     /// When false, context lines are passed as plain source text.
     /// </param>
     /// <param name="mergeStackedLines">
@@ -532,10 +549,10 @@ public class SubtitleTranslationService
     /// <param name="stripSubtitleFormatting">Whether to strip formatting from subtitles.</param>
     /// <param name="isBeforeContext">If true, builds context before the index; otherwise, builds after.</param>
     /// <remarks>
-    /// With <c>useTranslatedContext</c> enabled every context line becomes one JSON object
-    /// (<see cref="ContextLine"/>) with its position and text; "before" lines that already carry a
-    /// non-empty translation include it, so the model sees how earlier lines were translated. "After"
-    /// lines never have a translation yet. With the option disabled, lines are plain source text.
+    /// With <c>useTranslatedContext</c> enabled every context line becomes one JSON object with its
+    /// position and text; "before" lines that already carry a non-empty translation include it, so
+    /// the model sees how earlier lines were translated. "After" lines never have a translation yet.
+    /// With the option disabled, lines are plain source text.
     /// </remarks>
     private List<string> BuildContext(
         List<SubtitleItem> subtitles, 

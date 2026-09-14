@@ -56,7 +56,8 @@
                         Sends {contextBefore} and {contextAfter} as one JSON object per line with
                         its position and text, plus the translation for lines that are already
                         translated, so the AI can keep names and terms consistent. Only applies when
-                        the placeholders are used in the user prompt.
+                        the placeholders are used in the user prompt; tell the model in the prompt
+                        to follow the earlier translations.
                     </div>
                     <ToggleButton v-model="useTranslatedContext">
                         <span class="text-primary-content text-sm font-medium">

@@ -44,11 +44,9 @@ Every provider class must be marked with:
 The identifier is used internally and is what users select in the Services settings page.
 Every plugin must also declare the plugin API version:
 ```csharp
-[assembly: LingarrPluginApiVersion(1, 1)]
+[assembly: LingarrPluginApiVersion(1, 0)]
 ```
-This version is based on `Lingarr.Contracts`, not the main Lingarr version. The loader only checks the major version, so a plugin built against 1.0 keeps loading; the minor version tells you which additions the contract has:
-
-- **1.1**: the `contextLinesBefore` / `contextLinesAfter` arguments of `TranslateAsync` may carry JSON objects instead of plain lines when the user enables the *Structured context with translations* setting. Each entry is then a serialised `Lingarr.Contracts.Models.ContextLine` (`position`, `line`, and `translation` for lines already translated). Plugins that do not need the structure can keep passing the entries through as text.
+This version is based on `Lingarr.Contracts`, not the main Lingarr version.
 
 ## How plugins are loaded
 
@@ -85,6 +83,7 @@ See the sample plugin for a full example of HTTP handling and retries.
 - Only depend on `Lingarr.Contracts`, this is the only stable API.
 - Plugins share the same process. Use dependency versions compatible with Lingarr to avoid conflicts.
 - Plugins run with full permissions (no sandbox). Only add DLLs you trust.
+- When the `ai_context_use_translated` setting is on, the `contextLinesBefore` / `contextLinesAfter` arguments of `TranslateAsync` contain JSON objects (`position`, `line`, and `translation` for lines already translated) instead of plain lines; a plugin that does not need the structure can pass them through as text.
 
 ## Reference plugin
 Check the `samples/CloudflarePlugin/` folder for a complete working example. It demonstrates:
