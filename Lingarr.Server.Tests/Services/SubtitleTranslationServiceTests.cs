@@ -41,15 +41,6 @@ public class SubtitleTranslationServiceTests
         PlaintextLines = lines.ToList()
     };
 
-    private static SubtitleItem Subtitle(int position, int startTime, int endTime, params string[] lines) => new()
-    {
-        Position = position,
-        StartTime = startTime,
-        EndTime = endTime,
-        Lines = lines.ToList(),
-        PlaintextLines = lines.ToList()
-    };
-
     /// <summary>
     /// Mirrors how <c>TranslationRequestService.TranslateContentAsync</c> builds items for the
     /// <c>/api/translate/content</c> endpoint: position and text only, no timing information.
@@ -64,9 +55,19 @@ public class SubtitleTranslationServiceTests
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    /// <summary>Expected context entry when translated context is enabled.</summary>
-    private static string ContextJson(int position, string line, string? translation = null) =>
-        JsonSerializer.Serialize(new ContextLine { Position = position, Line = line, Translation = translation }, ExpectedJsonOptions);
+    /// <summary>
+    /// Expected context entry when translated context is enabled. Built from a dictionary on purpose,
+    /// so the tests pin the wire format itself rather than share a type with the code under test.
+    /// </summary>
+    private static string ContextJson(int position, string line, string? translation = null)
+    {
+        var entry = new Dictionary<string, object> { ["position"] = position, ["line"] = line };
+        if (translation is not null)
+        {
+            entry["translation"] = translation;
+        }
+        return JsonSerializer.Serialize(entry, ExpectedJsonOptions);
+    }
 
     private sealed class PerLineHarness
     {
@@ -498,7 +499,7 @@ public class SubtitleTranslationServiceTests
             contextAfter: 0,
             CancellationToken.None);
 
-        // Assert - each earlier line is one JSON object with position, source and translation, in order
+        // Assert - each earlier line is one JSON object with position, line and translation, in order
         Assert.Equal(3, harness.Calls.Count);
         Assert.Null(harness.Calls[0].ContextBefore);
         Assert.Equal(
